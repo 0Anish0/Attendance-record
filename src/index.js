@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const { WebClient } = require('@slack/web-api');
 const GoogleSheetsService = require('./services/googleSheets');
 const AttendanceService = require('./services/attendance');
-const { KEYWORDS, extractKeyword, parseSlackTimestamp } = require('./utils/helpers');
+const { extractKeyword, parseSlackTimestamp } = require('./utils/helpers');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -69,9 +69,17 @@ app.get('/health', (req, res) => {
   res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
+// Test endpoint to verify ngrok is working
+app.get('/test', (req, res) => {
+  console.log('✅ Test endpoint called!');
+  res.json({ message: 'Server is reachable!', timestamp: new Date().toISOString() });
+});
+
 // Main Slack events endpoint
 app.post('/slack/events', verifySlackRequest, async (req, res) => {
   const { type, challenge, event } = req.body;
+
+  console.log('📥 Received Slack event:', { type, eventType: event?.type });
 
   // Handle URL verification challenge
   if (type === 'url_verification') {
@@ -84,39 +92,50 @@ app.post('/slack/events', verifySlackRequest, async (req, res) => {
 
   // Process event asynchronously
   if (type === 'event_callback' && event) {
+    console.log('🔄 Processing event callback...');
     try {
       await handleSlackEvent(event);
     } catch (error) {
       console.error('Error processing event:', error);
     }
+  } else {
+    console.log('⚠️ Not an event_callback, ignoring');
   }
 });
 
 // Handle Slack message events
 async function handleSlackEvent(event) {
+  console.log('📨 Event received:', JSON.stringify(event, null, 2));
+
   // Only process message events
   if (event.type !== 'message') {
+    console.log('⏭️ Not a message event, skipping');
     return;
   }
 
   // Ignore bot messages, message edits, and deletions
   if (event.bot_id || event.subtype) {
+    console.log('⏭️ Bot message or subtype, skipping:', { bot_id: event.bot_id, subtype: event.subtype });
     return;
   }
 
   const { text, user, channel, ts } = event;
 
   if (!text || !user) {
+    console.log('⚠️ Missing text or user');
     return;
   }
+
+  console.log('📝 Message text:', text);
 
   // Extract keyword from message
   const keyword = extractKeyword(text);
   if (!keyword) {
+    console.log('⏭️ No keyword found in message');
     return;
   }
 
-  console.log(`Processing message: User=${user}, Channel=${channel}, Keyword=${keyword}`);
+  console.log(`✅ Processing message: User=${user}, Channel=${channel}, Keyword=${keyword}`);
 
   try {
     // Get user info from Slack
