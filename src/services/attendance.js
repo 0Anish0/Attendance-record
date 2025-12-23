@@ -1,5 +1,5 @@
 const moment = require('moment-timezone');
-const { KEYWORDS, timeToMinutes, minutesToTimeString } = require('../utils/helpers');
+const { KEYWORDS, timeToMinutes } = require('../utils/helpers');
 
 class AttendanceService {
   constructor(sheetsService) {
@@ -13,30 +13,40 @@ class AttendanceService {
     // Check for duplicate events
     if (this.sheetsService.isEventProcessed(slackTs, keyword)) {
       console.log(`Skipping duplicate event: ${slackTs}-${keyword}`);
-      return;
+      return { logged: false, reason: 'duplicate' };
     }
 
-    // Append to raw logs
+    // Append to raw logs (without Slack Username)
     await this.sheetsService.appendToRawLogs({
       date,
       time,
       employeeName,
-      slackUsername,
       channelName,
       keyword
     });
 
-    // Update daily summary
-    await this.updateDailySummary(date, slackUsername, employeeName);
+    console.log(`📝 Logged raw event: ${keyword} at ${time}`);
+
+    // Update daily summary (using employeeName instead of slackUsername)
+    const summary = await this.updateDailySummary(date, employeeName);
+
+    // Return summary for potential Slack notification
+    return { 
+      logged: true, 
+      keyword,
+      summary,
+      isFinalReport: keyword === KEYWORDS.EXIT || keyword === KEYWORDS.DAILY_REPORT
+    };
   }
 
-  async updateDailySummary(date, slackUsername, employeeName) {
-    // Get all logs for this date and user
+  async updateDailySummary(date, employeeName) {
+    // Get all logs for this date
     const dailyLogs = await this.sheetsService.getDailyLogs(date);
-    const userLogs = dailyLogs.filter(log => log[3] === slackUsername);
+    // Filter by Employee Name (column index 2, since Slack Username removed)
+    const userLogs = dailyLogs.filter(log => log[2] === employeeName);
 
     if (userLogs.length === 0) {
-      return;
+      return null;
     }
 
     // Sort logs by time
@@ -46,48 +56,113 @@ class AttendanceService {
       return timeA - timeB;
     });
 
-    // Calculate entry time (first #daily-task)
-    const entryLog = userLogs.find(log => log[5] === KEYWORDS.DAILY_TASK);
-    const entryTime = entryLog ? entryLog[1] : '-';
+    // ============================================
+    // TOTAL HOURS: #entry to #exit
+    // ============================================
+    const entryLog = userLogs.find(log => log[4] === KEYWORDS.ENTRY); // Column E (index 4) is Keyword
+    const entryTime = entryLog ? entryLog[1] : '-'; // Column B (index 1) is Time
 
-    // Calculate exit time (last #daily-report)
-    const exitLogs = userLogs.filter(log => log[5] === KEYWORDS.DAILY_REPORT);
+    const exitLogs = userLogs.filter(log => log[4] === KEYWORDS.EXIT);
     const exitTime = exitLogs.length > 0 ? exitLogs[exitLogs.length - 1][1] : '-';
 
-    // Calculate lunch duration
+    // Total Hours = #exit - #entry
+    const totalHours = this.calculateDuration(entryTime, exitTime);
+
+    // ============================================
+    // WORKING HOURS: #daily-task to #daily-report
+    // ============================================
+    const taskStartLog = userLogs.find(log => log[4] === KEYWORDS.DAILY_TASK);
+    const taskStartTime = taskStartLog ? taskStartLog[1] : '-';
+
+    const taskEndLogs = userLogs.filter(log => log[4] === KEYWORDS.DAILY_REPORT);
+    const taskEndTime = taskEndLogs.length > 0 ? taskEndLogs[taskEndLogs.length - 1][1] : '-';
+
+    // Gross working time (before deducting lunch and breaks)
+    const grossWorkingTime = this.calculateDuration(taskStartTime, taskEndTime);
+
+    // ============================================
+    // LUNCH DURATION: #lunchstart to #lunchend
+    // ============================================
     const lunchDuration = this.calculateLunchDuration(userLogs);
 
-    // Calculate total break duration
+    // ============================================
+    // BREAK DURATION: Sum of all #breakstart to #breakend pairs
+    // ============================================
     const breakDuration = this.calculateBreakDuration(userLogs);
+    const breakCount = this.countBreaks(userLogs);
 
-    // Calculate net working hours
-    const netWorkingHours = this.calculateNetWorkingHours(entryTime, exitTime, lunchDuration, breakDuration);
+    // ============================================
+    // NET WORKING HOURS
+    // = (#daily-report - #daily-task) - lunch - breaks
+    // ============================================
+    const netWorkingHours = Math.max(0, grossWorkingTime - lunchDuration - breakDuration);
 
-    // Update the daily summary
-    await this.sheetsService.updateDailySummary({
+    const summaryData = {
       date,
-      slackUsername,
       employeeName,
-      entryTime,
-      exitTime,
+      // Office presence
+      entryTime,           // #entry time
+      exitTime,            // #exit time
+      totalHours: this.formatDuration(totalHours),  // #exit - #entry
+      // Work tracking
+      taskStartTime,       // #daily-task time
+      taskEndTime,         // #daily-report time
+      // Deductions
       lunchDuration: this.formatDuration(lunchDuration),
       breakDuration: this.formatDuration(breakDuration),
+      breakCount,
+      // Final calculation
       netWorkingHours: this.formatDuration(netWorkingHours)
-    });
+    };
+
+    // Update the daily summary in Google Sheets
+    await this.sheetsService.updateDailySummary(summaryData);
+
+    console.log(`\n📊 Summary for ${employeeName} on ${date}:`);
+    console.log(`   ┌─────────────────────────────────────────┐`);
+    console.log(`   │ OFFICE PRESENCE                         │`);
+    console.log(`   │   Entry (#entry):     ${entryTime.padEnd(12)}    │`);
+    console.log(`   │   Exit (#exit):       ${exitTime.padEnd(12)}    │`);
+    console.log(`   │   Total Hours:        ${this.formatDuration(totalHours).padEnd(12)}    │`);
+    console.log(`   ├─────────────────────────────────────────┤`);
+    console.log(`   │ WORK TRACKING                           │`);
+    console.log(`   │   Task Start:         ${taskStartTime.padEnd(12)}    │`);
+    console.log(`   │   Task End:           ${taskEndTime.padEnd(12)}    │`);
+    console.log(`   │   Lunch Duration:     ${this.formatDuration(lunchDuration).padEnd(12)}    │`);
+    console.log(`   │   Break Duration:     ${this.formatDuration(breakDuration)} (${breakCount} breaks) │`);
+    console.log(`   ├─────────────────────────────────────────┤`);
+    console.log(`   │ NET WORKING HOURS:    ${this.formatDuration(netWorkingHours).padEnd(12)}    │`);
+    console.log(`   └─────────────────────────────────────────┘\n`);
+
+    return summaryData;
+  }
+
+  calculateDuration(startTime, endTime) {
+    if (startTime === '-' || endTime === '-') {
+      return 0;
+    }
+
+    const startMinutes = timeToMinutes(startTime);
+    const endMinutes = timeToMinutes(endTime);
+
+    if (endMinutes <= startMinutes) {
+      return 0;
+    }
+
+    return endMinutes - startMinutes;
   }
 
   calculateLunchDuration(userLogs) {
-    const lunchStart = userLogs.find(log => log[5] === KEYWORDS.LUNCH_START);
-    const lunchEnd = userLogs.find(log => log[5] === KEYWORDS.LUNCH_END);
+    const lunchStart = userLogs.find(log => log[4] === KEYWORDS.LUNCH_START); // Column E (index 4)
+    const lunchEnd = userLogs.find(log => log[4] === KEYWORDS.LUNCH_END);
 
     if (!lunchStart || !lunchEnd) {
       return 0;
     }
 
-    const startMinutes = timeToMinutes(lunchStart[1]);
+    const startMinutes = timeToMinutes(lunchStart[1]); // Column B (index 1) is Time
     const endMinutes = timeToMinutes(lunchEnd[1]);
 
-    // Only count if lunch end is after lunch start
     if (endMinutes > startMinutes) {
       return endMinutes - startMinutes;
     }
@@ -96,26 +171,28 @@ class AttendanceService {
   }
 
   calculateBreakDuration(userLogs) {
-    // Get all break start and end events
+    // Get all break start and end events sorted by time
     const breakStarts = userLogs
-      .filter(log => log[5] === KEYWORDS.BREAK_START)
-      .map(log => ({ time: log[1], minutes: timeToMinutes(log[1]) }));
+      .filter(log => log[4] === KEYWORDS.BREAK_START) // Column E (index 4) is Keyword
+      .map(log => ({ time: log[1], minutes: timeToMinutes(log[1]) })) // Column B (index 1) is Time
+      .sort((a, b) => a.minutes - b.minutes);
 
     const breakEnds = userLogs
-      .filter(log => log[5] === KEYWORDS.BREAK_END)
-      .map(log => ({ time: log[1], minutes: timeToMinutes(log[1]) }));
+      .filter(log => log[4] === KEYWORDS.BREAK_END)
+      .map(log => ({ time: log[1], minutes: timeToMinutes(log[1]) }))
+      .sort((a, b) => a.minutes - b.minutes);
 
     let totalBreakMinutes = 0;
-
-    // Match break starts with break ends
     const usedEnds = new Set();
 
+    // Match each break start with the next available break end
     for (const start of breakStarts) {
-      // Find the first break end that comes after this start and hasn't been used
       for (let i = 0; i < breakEnds.length; i++) {
         if (!usedEnds.has(i) && breakEnds[i].minutes > start.minutes) {
-          totalBreakMinutes += breakEnds[i].minutes - start.minutes;
+          const breakTime = breakEnds[i].minutes - start.minutes;
+          totalBreakMinutes += breakTime;
           usedEnds.add(i);
+          console.log(`   Break: ${start.time} → ${breakEnds[i].time} = ${breakTime} mins`);
           break;
         }
       }
@@ -124,34 +201,23 @@ class AttendanceService {
     return totalBreakMinutes;
   }
 
-  calculateNetWorkingHours(entryTime, exitTime, lunchMinutes, breakMinutes) {
-    if (entryTime === '-' || exitTime === '-') {
-      return 0;
-    }
-
-    const entryMinutes = timeToMinutes(entryTime);
-    const exitMinutes = timeToMinutes(exitTime);
-
-    if (exitMinutes <= entryMinutes) {
-      return 0;
-    }
-
-    const totalMinutes = exitMinutes - entryMinutes;
-    const netMinutes = totalMinutes - lunchMinutes - breakMinutes;
-
-    return Math.max(0, netMinutes);
+  countBreaks(userLogs) {
+    const breakStarts = userLogs.filter(log => log[4] === KEYWORDS.BREAK_START); // Column E (index 4)
+    const breakEnds = userLogs.filter(log => log[4] === KEYWORDS.BREAK_END);
+    
+    // Return the minimum of starts and ends (completed breaks)
+    return Math.min(breakStarts.length, breakEnds.length);
   }
 
   formatDuration(minutes) {
-    if (minutes === 0) {
+    if (minutes === 0 || isNaN(minutes)) {
       return '0:00';
     }
 
     const hours = Math.floor(minutes / 60);
-    const mins = minutes % 60;
+    const mins = Math.round(minutes % 60);
     return `${hours}:${mins.toString().padStart(2, '0')}`;
   }
 }
 
 module.exports = AttendanceService;
-

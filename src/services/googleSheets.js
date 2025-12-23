@@ -29,8 +29,30 @@ class GoogleSheetsService {
       const existingSheets = spreadsheet.data.sheets.map(s => s.properties.title);
 
       const requiredSheets = [
-        { name: 'raw_logs', headers: ['Date', 'Time', 'Employee Name', 'Slack Username', 'Channel Name', 'Keyword'] },
-        { name: 'daily_summary', headers: ['Date', 'Slack Username', 'Employee Name', 'Entry Time', 'Exit Time', 'Lunch Duration', 'Break Duration', 'Net Working Hours'] }
+        { 
+          name: 'raw_logs', 
+          headers: ['Date', 'Time', 'Employee Name', 'Channel Name', 'Keyword'],
+          range: 'A1:E1',
+          clearRange: 'A1:Z1' // Clear entire header row to remove old columns
+        },
+        { 
+          name: 'daily_summary', 
+          headers: [
+            'Date',              // A
+            'Employee Name',     // B
+            'Entry Time',        // C - #entry
+            'Exit Time',         // D - #exit
+            'Total Hours',       // E - #exit - #entry (office presence)
+            'Task Start',        // F - #daily-task
+            'Task End',          // G - #daily-report
+            'Lunch Duration',    // H - #lunchstart to #lunchend
+            'Break Duration',    // I - Sum of all breaks
+            'Break Count',       // J - Number of breaks
+            'Net Working Hours'  // K - (Task End - Task Start) - Lunch - Breaks
+          ],
+          range: 'A1:K1',
+          clearRange: 'A1:Z1' // Clear entire header row to remove duplicate columns
+        }
       ];
 
       for (const sheet of requiredSheets) {
@@ -50,31 +72,32 @@ class GoogleSheetsService {
           // Add headers
           await this.sheets.spreadsheets.values.update({
             spreadsheetId: this.spreadsheetId,
-            range: `${sheet.name}!A1`,
+            range: `${sheet.name}!${sheet.range}`,
             valueInputOption: 'RAW',
             resource: {
               values: [sheet.headers]
             }
           });
 
-          console.log(`Created sheet: ${sheet.name}`);
+          console.log(`Created sheet: ${sheet.name} with headers`);
         } else {
-          // Verify headers exist
-          const headerCheck = await this.sheets.spreadsheets.values.get({
+          // Clear old headers completely (including any extra columns)
+          await this.sheets.spreadsheets.values.clear({
             spreadsheetId: this.spreadsheetId,
-            range: `${sheet.name}!A1:H1`,
+            range: `${sheet.name}!${sheet.clearRange}`
           });
 
-          if (!headerCheck.data.values || headerCheck.data.values.length === 0) {
-            await this.sheets.spreadsheets.values.update({
-              spreadsheetId: this.spreadsheetId,
-              range: `${sheet.name}!A1`,
-              valueInputOption: 'RAW',
-              resource: {
-                values: [sheet.headers]
-              }
-            });
-          }
+          // Write correct headers
+          await this.sheets.spreadsheets.values.update({
+            spreadsheetId: this.spreadsheetId,
+            range: `${sheet.name}!${sheet.range}`,
+            valueInputOption: 'RAW',
+            resource: {
+              values: [sheet.headers]
+            }
+          });
+
+          console.log(`✅ Updated headers for sheet: ${sheet.name}`);
         }
       }
     } catch (error) {
@@ -101,15 +124,24 @@ class GoogleSheetsService {
   }
 
   async appendToRawLogs(data) {
-    const { date, time, employeeName, slackUsername, channelName, keyword } = data;
+    const { date, time, employeeName, channelName, keyword } = data;
+
+    // Ensure data array matches headers exactly: Date, Time, Employee Name, Channel Name, Keyword
+    const rowData = [
+      date,          // A - Date
+      time,          // B - Time
+      employeeName,  // C - Employee Name
+      channelName,   // D - Channel Name
+      keyword        // E - Keyword
+    ];
 
     await this.sheets.spreadsheets.values.append({
       spreadsheetId: this.spreadsheetId,
-      range: 'raw_logs!A:F',
+      range: 'raw_logs!A:E',
       valueInputOption: 'RAW',
       insertDataOption: 'INSERT_ROWS',
       resource: {
-        values: [[date, time, employeeName, slackUsername, channelName, keyword]]
+        values: [rowData]
       }
     });
   }
@@ -118,12 +150,13 @@ class GoogleSheetsService {
     try {
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: this.spreadsheetId,
-        range: 'raw_logs!A:F',
+        range: 'raw_logs!A:E',
       });
 
       const rows = response.data.values || [];
       // Filter by date (skip header row)
-      return rows.slice(1).filter(row => row[0] === date);
+      // Column structure: A=Date, B=Time, C=Employee Name, D=Channel Name, E=Keyword
+      return rows.slice(1).filter(row => row && row[0] === date);
     } catch (error) {
       console.error('Error getting daily logs:', error);
       return [];
@@ -131,49 +164,83 @@ class GoogleSheetsService {
   }
 
   async updateDailySummary(summaryData) {
-    const { date, slackUsername, employeeName, entryTime, exitTime, lunchDuration, breakDuration, netWorkingHours } = summaryData;
+    const { 
+      date, 
+      employeeName, 
+      entryTime,        // #entry
+      exitTime,         // #exit
+      totalHours,       // #exit - #entry
+      taskStartTime,    // #daily-task
+      taskEndTime,      // #daily-report
+      lunchDuration, 
+      breakDuration, 
+      breakCount,
+      netWorkingHours   // (taskEnd - taskStart) - lunch - breaks
+    } = summaryData;
 
     try {
       // Get existing summary data
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: this.spreadsheetId,
-        range: 'daily_summary!A:H',
+        range: 'daily_summary!A:K',
       });
 
       const rows = response.data.values || [];
       
-      // Find if entry exists for this user and date
+      // Find if entry exists for this employee and date
+      // Column structure: A=Date, B=Employee Name, C=Entry Time, ...
       let rowIndex = -1;
       for (let i = 1; i < rows.length; i++) {
-        if (rows[i][0] === date && rows[i][1] === slackUsername) {
+        if (rows[i] && rows[i][0] === date && rows[i][1] === employeeName) {
           rowIndex = i + 1; // +1 because sheets are 1-indexed
           break;
         }
       }
 
-      const rowData = [date, slackUsername, employeeName, entryTime, exitTime, lunchDuration, breakDuration, netWorkingHours];
+      // Row data matching headers exactly - 11 columns (A through K)
+      const rowData = [
+        date || '-',              // A - Date
+        employeeName || '-',      // B - Employee Name
+        entryTime || '-',         // C - Entry Time (#entry)
+        exitTime || '-',          // D - Exit Time (#exit)
+        totalHours || '0:00',     // E - Total Hours (#exit - #entry)
+        taskStartTime || '-',     // F - Task Start (#daily-task)
+        taskEndTime || '-',       // G - Task End (#daily-report)
+        lunchDuration || '0:00',  // H - Lunch Duration
+        breakDuration || '0:00',  // I - Break Duration (all breaks combined)
+        breakCount || 0,          // J - Number of breaks
+        netWorkingHours || '0:00' // K - Net Working Hours
+      ];
 
       if (rowIndex > 0) {
-        // Update existing row
+        // Update existing row - clear the entire row first to remove old misaligned data
+        await this.sheets.spreadsheets.values.clear({
+          spreadsheetId: this.spreadsheetId,
+          range: `daily_summary!A${rowIndex}:Z${rowIndex}`
+        });
+
+        // Then write correct data
         await this.sheets.spreadsheets.values.update({
           spreadsheetId: this.spreadsheetId,
-          range: `daily_summary!A${rowIndex}:H${rowIndex}`,
+          range: `daily_summary!A${rowIndex}:K${rowIndex}`,
           valueInputOption: 'RAW',
           resource: {
             values: [rowData]
           }
         });
+        console.log(`📊 Updated existing row ${rowIndex} for ${employeeName}`);
       } else {
         // Append new row
         await this.sheets.spreadsheets.values.append({
           spreadsheetId: this.spreadsheetId,
-          range: 'daily_summary!A:H',
+          range: 'daily_summary!A:K',
           valueInputOption: 'RAW',
           insertDataOption: 'INSERT_ROWS',
           resource: {
             values: [rowData]
           }
         });
+        console.log(`📊 Added new row for ${employeeName}`);
       }
     } catch (error) {
       console.error('Error updating daily summary:', error);
@@ -183,4 +250,3 @@ class GoogleSheetsService {
 }
 
 module.exports = GoogleSheetsService;
-

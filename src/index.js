@@ -180,20 +180,29 @@ async function startServer() {
 
     app.listen(PORT, () => {
       console.log(`
-╔════════════════════════════════════════════════════════════╗
-║     Slack Attendance System Started Successfully!          ║
-╠════════════════════════════════════════════════════════════╣
-║  Server running on port: ${PORT}                              ║
-║  Slack Events URL: http://your-domain:${PORT}/slack/events    ║
-║                                                            ║
-║  Monitored Keywords:                                       ║
-║    • #daily-task   → Entry Time                            ║
-║    • #daily-report → Exit Time                             ║
-║    • #lunchstart   → Lunch Start                           ║
-║    • #lunchend     → Lunch End                             ║
-║    • #breakstart   → Break Start                           ║
-║    • #breakend     → Break End                             ║
-╚════════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════════╗
+║       Slack Attendance System Started Successfully!              ║
+╠══════════════════════════════════════════════════════════════════╣
+║  Server running on port: ${PORT}                                    ║
+║                                                                  ║
+║  OFFICE PRESENCE (Total Hours):                                  ║
+║    • #entry        → Office Entry Time                           ║
+║    • #exit         → Office Exit Time                            ║
+║                                                                  ║
+║  WORK TRACKING (Working Hours):                                  ║
+║    • #daily-task   → Work Start Time                             ║
+║    • #daily-report → Work End Time                               ║
+║                                                                  ║
+║  BREAKS:                                                         ║
+║    • #lunchstart   → Lunch Start                                 ║
+║    • #lunchend     → Lunch End                                   ║
+║    • #breakstart   → Break Start (multiple allowed)              ║
+║    • #breakend     → Break End                                   ║
+║                                                                  ║
+║  CALCULATION:                                                    ║
+║    Total Hours = #exit - #entry                                  ║
+║    Working Hours = (#daily-report - #daily-task) - lunch - breaks║
+╚══════════════════════════════════════════════════════════════════╝
       `);
     });
   } catch (error) {

@@ -2,10 +2,19 @@ const moment = require('moment-timezone');
 
 // Keywords configuration
 const KEYWORDS = {
+  // Total hours tracking (office entry/exit)
+  ENTRY: '#entry',
+  EXIT: '#exit',
+  
+  // Working hours tracking (actual work start/end)
   DAILY_TASK: '#daily-task',
   DAILY_REPORT: '#daily-report',
+  
+  // Lunch tracking
   LUNCH_START: '#lunchstart',
   LUNCH_END: '#lunchend',
+  
+  // Break tracking (multiple allowed)
   BREAK_START: '#breakstart',
   BREAK_END: '#breakend'
 };
@@ -102,4 +111,3 @@ module.exports = {
   minutesToTimeString,
   calculateDuration
 };
-
